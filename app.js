@@ -5,6 +5,7 @@
 const STORAGE = {
     SETTINGS: 'zt_settings',
     ENTRIES: 'zt_entries',
+    SYNC_DIRTY: 'zt_sync_dirty',
 };
 
 const MONTHS = [
@@ -15,6 +16,12 @@ const MONTHS = [
 // ============================================================
 // HELPERS
 // ============================================================
+
+function parseDate(str) {
+    const clean = str.includes('T') ? str.split('T')[0] : str;
+    const [y, m, d] = clean.split('-').map(Number);
+    return new Date(y, m - 1, d);
+}
 
 function toISODate(val) {
     if (!val) return null;
@@ -111,23 +118,31 @@ async function syncRead() {
         const res = await fetch(`${url}?action=read&t=${Date.now()}`);
         const data = await res.json();
         if (data.status === 'success') {
-            entriesCache = data.entries;
-            localStorage.setItem(STORAGE.ENTRIES, JSON.stringify(entriesCache));
-            refreshEntries();
+            const remote = data.entries || [];
+            const localIds = new Set(entriesCache.map(e => e.id));
+            const newFromRemote = remote.filter(e => !localIds.has(e.id));
+            if (newFromRemote.length > 0) {
+                entriesCache = [...entriesCache, ...newFromRemote];
+                localStorage.setItem(STORAGE.ENTRIES, JSON.stringify(entriesCache));
+                refreshEntries();
+                // Sync back so remote has complete dataset
+                syncWrite();
+            }
         }
     } catch (e) {
-        console.error('Sync error:', e);
+        console.error('Sync read error:', e);
     }
 }
 
 async function syncWrite() {
     const s = getSettings();
     if (!s.scriptUrl) return;
+    localStorage.setItem(STORAGE.SYNC_DIRTY, '1');
     try {
-        await fetch(s.scriptUrl, {
+        const res = await fetch(s.scriptUrl, {
             method: 'POST',
-            mode: 'no-cors',
-            headers: { 'Content-Type': 'application/json' },
+            redirect: 'follow',
+            headers: { 'Content-Type': 'text/plain' },
             body: JSON.stringify({
                 action: 'write',
                 entries: entriesCache,
@@ -139,8 +154,15 @@ async function syncWrite() {
                 }
             })
         });
+        if (res.ok) {
+            localStorage.removeItem(STORAGE.SYNC_DIRTY);
+        } else {
+            console.error('Sync write failed:', res.status);
+            showToast('Sync fehlgeschlagen');
+        }
     } catch (e) {
-        console.error('Save error:', e);
+        console.error('Sync write error:', e);
+        showToast('Sync fehlgeschlagen');
     }
 }
 
@@ -185,7 +207,7 @@ function refreshEntries() {
     // Filter & Sort
     const monthEntries = entriesCache
         .filter(e => {
-            const d = new Date(e.date);
+            const d = parseDate(e.date);
             return d.getMonth() === month && d.getFullYear() === year;
         })
         .sort((a, b) => b.date.localeCompare(a.date) || b.from.localeCompare(a.from));
@@ -661,7 +683,7 @@ function exportExcel() {
 
     const monthEntries = entriesCache
         .filter(e => {
-            const d = new Date(e.date);
+            const d = parseDate(e.date);
             return d.getMonth() === month && d.getFullYear() === year;
         })
         .sort((a, b) => a.date.localeCompare(b.date) || a.from.localeCompare(b.from));
@@ -698,7 +720,7 @@ function exportExcel() {
         runningTotal += e.hours;
 
         // Date conversion
-        const dateObj = new Date(e.date);
+        const dateObj = parseDate(e.date);
         ws['A' + r] = { v: dateObj, t: 'd', z: EXCEL_STYLES.FORMATS.DATE, s: EXCEL_STYLES.CELL_STYLES.DATA_LEFT };
 
         // Time conversion (HH:mm -> fraction of day)
@@ -739,7 +761,7 @@ function exportExcel() {
 // INITIALIZATION
 // ============================================================
 
-function init() {
+async function init() {
     // Navigation
     document.querySelectorAll('.nav-btn').forEach(btn => {
         btn.addEventListener('click', () => switchView(btn.dataset.view));
@@ -839,7 +861,7 @@ function init() {
         if (select) {
             const months = new Set();
             entriesCache.forEach(e => {
-                const d = new Date(e.date);
+                const d = parseDate(e.date);
                 months.add(`${d.getFullYear()}-${String(d.getMonth()).padStart(2, '0')}`);
             });
             const now = new Date();
@@ -921,7 +943,12 @@ function init() {
     TimePicker.init();
     DatePicker.init();
     loadEntries();
-    syncRead();
+
+    // If previous sync failed, push local data first before reading
+    if (localStorage.getItem(STORAGE.SYNC_DIRTY)) {
+        await syncWrite();
+    }
+    await syncRead();
 
     // Set initial view
     switchView('view-entry');

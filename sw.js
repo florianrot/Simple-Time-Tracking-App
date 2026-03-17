@@ -1,4 +1,4 @@
-const CACHE_NAME = 'zt-cache-v1.7';
+const CACHE_NAME = 'zt-cache-v1.9';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
@@ -39,9 +39,9 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
     event.respondWith(
-        fetch(event.request)
-            .catch(() => {
-                return caches.match(event.request);
-            })
+        Promise.race([
+            fetch(event.request),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
+        ]).catch(() => caches.match(event.request))
     );
 });
